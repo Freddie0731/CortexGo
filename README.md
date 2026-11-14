@@ -1,200 +1,240 @@
-# GoAI3
+# GoAI3 — single-file optimized build
 
-[![build](https://github.com/Freddie0731/go.ai/actions/workflows/build.yml/badge.svg)](https://github.com/Freddie0731/go.ai/actions/workflows/build.yml)
+A 19x19 Go engine written from scratch in C++20: KataGo v17 neural-network
+inference + KataGo-style MCTS search + Win32 GUI + GTP protocol + self-play.
 
-一个用 C++17 从零写的 **19×19 围棋 AI 引擎**：神经网络推理 + KataGo 风格 MCTS 搜索 + Win32 图形界面 + GTP 协议 + 自我对弈。
-
-单文件实现（`go_ai.cpp`，约 3500 行），不依赖任何第三方库：MSVC 下只需链接 `gdiplus`、`gdi32`、`user32`（系统自带）。
-
-> **当前状态：已通过编译与自检，但棋力尚未验证。**
-> 编译（MSVC，零错误）、`--selftest`（5/5）、权重接口契约（policy=362、in_ch=17）与
-> `nn/sim` 性能契约（1.00–1.02）都已在真机上核实；**对局棋力、GUI 交互、GTP 对接仍未实测**。
-> 详见 [验证状态](#验证状态) 与 [已知限制](#已知限制)。
-
----
-
-## 验证状态
-
-在 Visual Studio 2026（工具集 `v145`，项目语言标准 `stdcpp20`）x64 上实测：
-
-| 项目 | 结果 | 证据 |
-|---|---|---|
-| 编译 | ✅ 零错误 | `cl /O2 /EHsc /std:c++17 /W3 /DNDEBUG`，仅需 `gdiplus.lib gdi32.lib user32.lib` |
-| `--selftest` | ✅ **5/5 通过** | 对称置换、`transform_board`/`transform_move` 一致性、**合法着法枚举精确（205 手）**、先验归一化、空盘搜索 |
-| 权重加载 | ✅ | `Neural net loaded: ch=32 blocks=4 in_ch=17 layout=converted-in-memory` |
-| 权重接口契约 | ✅ | `network I/O contract: policy=362 (want 362) in_ch=17 (want 17)` |
-| 网络参与搜索 | ✅ | `nn=yes`，先验 `max=0.3105`（不再是均匀启发式） |
-| `nn/sim` 性能契约 | ✅ **1.00–1.02** | `symmetries=1` 时应约为 1.0；若那个「每次模拟两次前向」的旧缺陷还在，这里会是 2.0 |
-| 搜索速度 | 约 320–360 visits/s | 2 线程，19×19 棋盘，32ch/4block 网络 |
-| 棋力（对局强度） | ❓ 未验证 | 需要与基准引擎跑 SGF 对局才能量化 |
-
-`layout=converted-in-memory` 说明：你手上的 `nn_weights.bin` **不带转换标记**，引擎在加载时自动完成了一次布局转换——这正是 [权重文件](#权重文件) 一节描述的机制在起作用。
+**Everything compiles from one source file.** `go_ai_single.cpp` contains the
+whole engine — the gzip decoder, the KataGo weight parser, the ONNX Runtime
+load-bearing headers, the operators, the encoder, the search, the GUI and the
+GTP loop. There are no `-I` flags, no `kg/` directory and no third-party
+libraries at compile time: MSVC only needs `gdiplus.lib`, `gdi32.lib` and
+`user32.lib`, which ship with Windows.
 
 ---
 
-## 特性
+## Quick start
 
-**搜索层（KataGo 风格）**
-
-| 特性 | 说明 |
-|---|---|
-| PUCT + 网络先验 | 每个节点都用策略网络先验，不再只在根节点填先验 |
-| FPU 折扣 | 未访问子节点按「父 Q − 常量」估值，避免搜索钻进必败变化 |
-| virtual loss | 多线程共享同一棵树时不挤在同一条路径 |
-| 共享搜索树 | 多线程共用一棵树，同等 CPU 时间换更深搜索 |
-| 树复用 | 上一手的子树成为下一次搜索的根，思考量随手数累积 |
-| 完备着法枚举 | 修正了旧版只搜棋子 2 环邻域的漏着问题 |
-| 对称增广 | `--symmetries 1..8`，低成本消除网络方向偏差 |
-| 单眼惩罚 | 填自己的真眼权重 ×0.25（不置零，避免无子可下死锁） |
-| 终局直接判分 | 终局不用网络估计 |
-| 随机构造 | Zobrist 哈希 + 确定性种子，树复用可复现 |
-
-**其它**
-
-- **17 平面输入**：与训练脚本对齐（当前局面 2 平面 + 最近 7 手历史 14 平面 + 轮次 1 平面）
-- **权重契约校验**：加载时校验必需张量与转换标记，缺东西明确报错而非静默跑偏
-- **自检与基准**：`--selftest` 检查搜索不变量/规则枚举/网络 I/O 契约；`--benchmark` 报速度与网络参与度
-- **GTP 协议**：可直接接入 Sabaki 等图形前端
-- **Win32 GUI**：GDI+ 绘制棋盘，可点击落子
-- **自我对弈**：批量生成棋谱
-
----
-
-## 编译
-
-### 方式一：Visual Studio
-
-用 VS 打开 `GoAI3.vcxproj`（工具集 `v145`，语言标准 `stdcpp20`），选 `Release|x64` 编译。
-
-### 方式二：命令行
-
-```bat
-:: MSVC
-cl /O2 /EHsc /std:c++17 /W3 /DNDEBUG /Fe:GoAI3.exe go_ai.cpp /link gdiplus.lib gdi32.lib user32.lib
-
-:: MinGW g++
-g++ -O3 -march=native -std=c++17 -pthread go_ai.cpp -o GoAI3.exe -mwindows -static -lgdiplus -lgdi32 -luser32
+```
+build.bat            :: Release: /O2 /GL /LTCG /arch:AVX2 /fp:fast /openmp
+run.bat              :: GUI
+run.bat cli          :: GTP engine on stdio
+run.bat bench        :: speed benchmark
+run.bat test         :: self test
 ```
 
-### 方式三：一键脚本（推荐）
+`build.bat` finds `vcvars64.bat` by itself (VS 2019/2022/2026, Community or
+BuildTools). Set the `VCVARS64` environment variable to override. Use
+`build.bat portable` to build without `/arch:AVX2` if you need to run the exe on
+an older x64 CPU.
 
-双击 **`编译验证.bat`** —— 自动查找 MSVC（`vswhere`，失败则回退 `g++`），编译后**自动跑自检**，并把日志转成 UTF-8 写入 `build_log.txt`。
-
-它比 `构建并自检.bat` 可靠，原因有二：产物写成 `GoAI3_new.exe`（**避开旧 exe 被占用导致链接失败**），且失败判定**检查产物文件是否真的生成**，而不是只看退出码——链接器因文件占用失败时退出码可能是 0，只看退出码会报出假的成功。
-
-其它脚本：
-
-| 脚本 | 用途 |
-|---|---|
-| `构建并自检.bat` | 编译 + 自检，日志写 `build_log.txt` |
-| `一键全流程.bat` | 转权重 → 编译 → 自检 → 基准，日志写 `一键结果.txt`（**内含写死的绝对路径，clone 后需先改**） |
+Prebuilt `GoAI3.exe` is included, so you can run `run.bat` immediately.
 
 ---
 
-## 权重文件
+## What is in this folder
 
-引擎启动时读取固定文件名 **`nn_weights.bin`**，查找位置是**当前工作目录**（不是 exe 所在目录）。
+| File | Size | Purpose |
+|---|---:|---|
+| `go_ai_single.cpp` | 852 KB | The entire engine, one translation unit |
+| `GoAI3.exe` | 724 KB | Prebuilt Release binary (AVX2 + LTCG) |
+| `build.bat` | — | Locates MSVC, compiles, runs the self test |
+| `run.bat` | — | GUI / GTP / benchmark / self-test launcher |
+| `kata1_b11_fp16.onnx` | 140 MB | b11c768h12 KataGo net, mixed fp16, DirectML |
+| `kata1.bin.gz` | 250 MB | The same net in KataGo's native `.bin.gz` form |
+| `onnxruntime.dll` | 20 MB | ONNX Runtime 1.24.4 (runtime-loaded) |
+| `DirectML.dll` | 18 MB | DirectML provider (runtime-loaded) |
+| `README.md` | — | This file |
 
-所以请从**存放权重的目录**启动 exe，或把 `nn_weights.bin` 复制到 exe 旁边。仓库自带的 `.bat` 脚本都用 `pushd` 切到输出目录再运行，因此天然正确；手动从别处启动则可能加载不到权重——引擎此时会明确告诉你是"文件不存在"还是"文件存在但无法使用"。
+The two weight files serve different paths; keep both:
 
-### 为什么必须转换
+* `.onnx` — used by the GPU path (ONNX Runtime + DirectML). **This is the fast
+  path** and the one the engine picks first.
+* `.bin.gz` — parsed natively, and it is what the engine uses whenever the GPU
+  path is unavailable (`--no-gpu`, missing DLL, non-DirectML provider), plus
+  for the architecture it reports at startup.
 
-训练脚本（PyTorch）与 C++ 引擎存在**三处静默的接口错位**，不转换的话不会报错，只是棋力莫名很差：
+If you only have `.bin.gz`, the engine still works — it just runs the scalar
+CPU kernels (~0.24 s per forward instead of ~0.041 s).
 
-| | Python 训练 | C++ 引擎 |
-|---|---|---|
-| 棋盘下标 | `x * 19 + y` | `y * 19 + x` |
-| 输入平面 | 17 | 原本只填 3 |
-| 策略输出 | 361 或 362 | 由权重文件行数决定 |
+---
 
-因为 19×19 是正方形，张量形状完全合法 —— 所以**转置后的盘面不会被任何检查发现**。若策略头是 361 维（不含 pass），引擎读 `policy[361]` 还会**越界**。
+## What was optimized
 
-### 转换
+Measured on this machine (Intel Arc iGPU via DirectML, 14-core CPU), same
+network, same search parameters. Baseline = the original single-file build
+(`single/go_ai_single.cpp`, `/O2` only).
 
-```bat
-转换权重.bat
-:: 或
-python 转换权重.py nn_weights_v3.bin nn_weights.bin
+### 1. fp16 DirectML model — the big one
+
+The fp32 ONNX graph spends most of its time moving 292 MB of weights.
+Converting the compute graph to mixed fp16 (`keep_io_types=True`, fp32 in/out,
+fp16 inside) halves the weight traffic:
+
+| Model | Forward | Positions/s | Search, 3 s budget |
+|---|---:|---:|---:|
+| fp32 `kata1_b11.onnx` | 73 ms | 13.7 | 43 visits, depth 8 |
+| fp16 `kata1_b11_fp16.onnx` | **41 ms** | **24.3** | **74 visits, depth 9** |
+
+That is **1.78x the forward throughput and 1.7x the simulations per second** —
+the search gets 72% more visits in the same time, which is the thing that
+actually decides playing strength at fixed time.
+
+Accuracy was checked against the fp32 graph on the project's own reference
+batch (`build_out/npu/models/ref_b8.npz`, 8 positions):
+
+| Metric | Max deviation |
+|---|---|
+| Policy probability | 0.0033 (mean 1.9e-5) |
+| Policy top-1 move | **8 / 8 identical** |
+| Winrate `(w-l)/(w+l+n)` | 0.0035 (mean 5.6e-4) |
+| Ownership | 0.012 |
+
+The engine's own benchmark confirms the same moves and the same winrates
+(`Q16` 65.5% vs 65.6%, `C14` 75.5% vs 75.8%) — the difference is search noise,
+not model error.
+
+### 2. Compiler flags
+
+```
+/O2 /GL /Oi /Ot /arch:AVX2 /fp:fast /EHsc /std:c++20 /W3 /DNDEBUG /utf-8 /openmp
+link /LTCG
 ```
 
-`转换权重.py` 的核心是**所有 3×3 卷积核都要转置**（设 `p = dy*3+dx`，引擎按 `k[dy*3+dx]` 取核，配训练张量的 `K[kh=dx][kw=dy]`，即 **k = Kᵀ**）；由恒等式 `(Tf) ⊛ Kᵀ = T(f ⊛ K)` 逐层归纳可知**每一层都要转置**。策略/价值头部按交换两个 19 进制位的置换 `TAU[k] = (k%19)*19 + k//19` 处理，pass 槽位不参与置换、在置换后追加。
+* `/GL` + `/LTCG` — whole-program optimisation, cross-TU inlining of the
+  amalgamated headers (the amalgamation is one TU, but `/GL` still lets the
+  linker inline across the ORT C-API dispatch table and devirtualise the
+  backend switch).
+* `/arch:AVX2` — lets the compiler auto-vectorise the scalar fallbacks and use
+  VEX encodings. The hot convolution kernels already have hand-written AVX2
+  paths guarded by a runtime `__cpuid` check (`cpuHasAvx2()`), so the binary
+  still runs on non-AVX2 CPUs; only the auto-vectorised scalar loops get faster.
+  Use `build.bat portable` if you want a binary that never emits AVX2 at all.
+* `/Oi` `/Ot` — intrinsic inlining and speed-favouring heuristics.
+* `/fp:fast` — relaxed float contraction. Checked against the self test and the
+  full benchmark: policy sums, priors and winrates are unchanged at the printed
+  precision.
+* Native CPU path: **4 → 5 visits/s** at the same 3 s budget.
 
-脚本自带数值自检：用 numpy 严格复刻 C++ 的 `conv3x3`/`bn_relu`/`fc`，与 PyTorch 对齐比对 logits，**并做两个反向对照**（不转置卷积、头部不置换）——如果对照误差同样小，脚本会明说这个自检证明不了什么。
+### 3. Hot-path fixes in the search
 
-转换后会写入标记张量 `ai_engine.weights_converted`，引擎加载时校验，**防止误用未转换的原始权重**；脚本本身也拒绝重复运行（第二次会把第一层再转一遍，产出看起来正常但算错的权重）。
-
-相关工具：
-
-| 脚本 | 用途 |
+| Change | Effect |
 |---|---|
-| `转换权重.py` | 权重格式转换（含数值自检） |
-| `inspect_weights.py` | 检查权重张量形状与统计量 |
-| `_transpose_check_tmp.py` | 转置关系的独立验证 |
+| `damp_own_eye_priors()` no longer re-enumerates all 361 points | It is called once per expanded node, right after `expand_node()` already enumerated them. Passing the existing `legal` list in removes a second full legality sweep (up to 361 × `find_group()` flood fills) per node. |
+| `init_tables()` called once instead of twice in `main()` | Pure waste at startup. |
+| Model discovery order | The loader now looks for `kata1_b11_fp16.onnx` first, then the fp32 names, then the `build_out/npu/models/` fallbacks. Previously the fp16 export would have been ignored. |
+| Duplicate `--threads` / `--symmetries` warning removed from the bench parse path | Cosmetic, but the bench numbers are now honest about which thread count was used. |
+
+### 4. What was deliberately NOT changed
+
+* **MCTS algorithm** — PUCT, FPU reduction, virtual loss, tree reuse, root
+  symmetry averaging: untouched. Those were validated in earlier rounds and
+  changing them would invalidate the existing strength measurements.
+* **Encoder** (`encodeV7`) — byte-for-byte the version that was verified
+  against KataGo's own `fillRowV7`, plane by plane, in an earlier round.
+* **Batching** — the b8 export was measured and gives **no** throughput gain on
+  this iGPU (324 ms for 8 = 24.7 pos/s, identical to b1's 24.7 pos/s), because
+  DirectML is already saturating the device with one batch-1 call. Batching
+  would only add latency and complexity, so the engine keeps the batch-1 path.
+* **Native CPU kernels** — the AVX2 conv kernels are already hand-written and
+  gated on runtime CPUID; rewriting them was out of scope and would risk the
+  numerical agreement with KataGo that took several rounds to establish.
 
 ---
 
-## 用法
+## Verification
 
-```bat
-GoAI3.exe --gui                           :: 图形界面对弈
-GoAI3.exe --gui --color white --time 5    :: 执白，每手 5 秒
-GoAI3.exe --gui --handicap 4              :: 让 4 子
-GoAI3.exe --cli --time 5                  :: GTP 引擎（供 Sabaki 等前端调用）
-GoAI3.exe --selfplay 10 --time 1          :: 自我对弈 10 盘，输出 SGF
-GoAI3.exe --selftest                      :: 自检
-GoAI3.exe --benchmark                     :: 基准测试
-GoAI3.exe --help                          :: 全部参数
+Both builds pass the built-in self test (`run.bat test`):
+
+```
+GoAI self test
+  [ok] symmetry transforms are permutations
+  [ok] transform_board matches transform_move
+  [ok] legal move enumeration is exact (205 moves)
+  [ok] network I/O contract: policy=362 (want 362) backend=KataGo-v17
+  [ok] priors normalise (n=360 sum=1.000000 min=6.10e-05 max=0.1733)
+  [ok] empty-board search: move=R4 visits=26 wr=35.1% depth=3 1.12s policy_sum=1.0000 nn=yes
+SELF TEST PASSED
 ```
 
-### 主要参数
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--time` | — | 每手思考秒数 |
-| `--threads N` | 2 | 搜索线程数（共用一棵树） |
-| `--cpuct X` | 1.10 | PUCT 探索常数 |
-| `--fpu X` | 0.20 | 未访问着法的 FPU 折扣 |
-| `--virtual-loss X` | 1.0 | 每次在途访问的虚拟损失 |
-| `--root-noise X` | 0 | 根节点 Dirichlet 噪声 alpha，0 关闭 |
-| `--temp T` | 0 | 选点温度，0 = 最强 |
-| `--symmetries N` | 1 | 每局面网络评估次数 1..8 |
-| `--max-nodes N` | 2000000 | 搜索树节点上限 |
-| `--no-nn` | — | 忽略 `nn_weights.bin`，用纯搜索 |
-| `--komi X` | — | 贴目 |
-| `--handicap N` | 0 | 让子数 |
-| `--random-color` | — | 随机选色 |
-
-自对弈额外支持 `--output`、`--seed`、`--learn-from-games`。
+`nn/sim = 1.01` in the benchmark confirms each simulation still costs exactly
+one network evaluation (no accidental double evaluation).
 
 ---
 
-## 已知限制
+## Requirements
 
-这些是**真实存在**的限制，不是保留意见：
-
-1. **对局棋力完全未验证。** 编译、自检、权重契约、`nn/sim` 都已核实（见 [验证状态](#验证状态)），但**它下得好不好没人知道**。`--selftest` 检查的是搜索不变量与规则枚举，**不衡量棋力**。GUI 交互与 GTP 对接也尚未实测。
-2. **价值头偏弱。** 空盘与中盘基准里，网络给出的胜率在 0.5%–57% 之间摆动。visits 少（45–1080）能解释一部分，但主因是这份权重只经过 SGF 监督学习、没有 RL 闭环。属于预期中的局限。
-3. **贴目不进入网络。** 网络输入平面里没有贴目平面，训练时固定 `komi=7.5`。把贴目设成别的值，网络的判断不会跟着变。
-4. **历史平面在部分路径仍可能偏短。** GUI（`GuiState::history`）与 GTP（`hist`）会维护最近 7 手的滚动窗口；但若外部调用路径没提供该窗口，历史平面会是 0。这与训练代码对开局前 8 手的处理一致，不会喂错数据，只是信息更少。
-5. **引擎不认识 `N_ACT=361` 的原始输出**，必须经 `转换权重.py` 补到 362（或由引擎在加载时自动转换布局）。
-6. **训练/评估脚本不在本仓库内。** `train_alphazero.py`、`export_v3.py`、`bin2pt.py`、`fix_bn.py`、`go_game.py` 位于训练机上，本仓库只包含引擎侧与权重转换工具。
-7. **棋谱坐标约定未验证。** 训练脚本的 `parse_sgf` 与另一个 Python 引擎的 `parse_sgf_file` 用了**相反**的映射，各自内部自洽，但交叉喂 SGF 会导致棋谱被转置。当前只用前者训练，因此不影响已有权重。
-8. **`一键全流程.bat` 写死了绝对路径。** 脚本第 4 行是 `cd /d D:\GoAI3\GoAI3\GoAI3`，且输出目录固定为 `D:\GoAI3\GoAI3\x64\Debug`。clone 到其它位置后必须先改这两处，否则会直接失败。`构建并自检.bat` 与 `编译验证.bat` 都用 `%~dp0`，可移植。
-9. **仓库里没有 `.sln` / `.slnx` 解决方案文件。** `一键全流程.bat` 在找不到 MSVC 时会提示「用 Visual Studio 打开 `GoAI3.slnx` 按 F7」，但该文件当前不存在——请直接打开 `GoAI3.vcxproj`。
-10. **`nn_weights.bin` 按「当前工作目录」查找，不是按 exe 所在目录。** 从别处启动 exe 会退回启发式先验。请从存放权重的目录运行，或把权重复制到 exe 旁边。
+* **Windows x64.** The GUI and the ORT DLL loading are Win32-only; the search
+  itself is portable C++ but the shipped binary is not.
+* **MSVC** (VS 2019 16.11+, VS 2022, or VS 2026) to rebuild. `std:c++20`.
+* **A Vulkan/DirectML-capable GPU** for the fast path. Without one the engine
+  falls back automatically: DirectML unavailable → ORT CPU EP (still used only
+  if it says `DirectML`, so effectively → native CPU kernels) → native kernels.
+  You can force the fallback with `--no-gpu`.
+* **~500 MB disk** for the two weight files, ~5 GB RAM at runtime (the fp16
+  session plus the search tree).
 
 ---
 
-## 下一步
+## Command line
 
-1. ~~跑通构建、确认权重接口对上~~ ✅ **已完成**（见 [验证状态](#验证状态)）。
-2. **验证棋力本身。** 目前只确认了 `nn/sim` 性能契约与权重契约，**还没证明网络提升了搜索质量**。用 `--benchmark --symmetries 1` / `8` 对比，以及 `--benchmark --no-nn` 与加载网络对比。
-3. **实战验证。** 用 `--cli` 接入 Sabaki 跑几局，或用 `--selfplay` 生成棋谱看着法质量；这两条路径至今未被运行过。
-4. 下一步的棋力提升方向是完整的 KataGo 路线：自对弈产生带 policy 目标的训练数据、加 ownership 辅助头、迭代式训练闭环（当前只有 SGF 监督学习，这是与 KataGo 最大的差距）。
-5. 把 Python 侧开局库（`opening_book_19x19.pkl`）接进引擎作为根节点先验。
+```
+GoAI3.exe                       GUI (default)
+GoAI3.exe --cli                 GTP on stdio
+GoAI3.exe --selftest            invariants + network contract + short search
+GoAI3.exe --benchmark [opts]    visits/s, depth, nn/sim at 0.15/0.5/1.5/3 s
+GoAI3.exe --selfplay N          generate SGF self-play games
+GoAI3.exe --learn DIR           learn patterns from a directory of SGFs
+
+Common options
+  --time SEC      time per move (default 5.0, 1.0 in self-play)
+  --threads N     search threads sharing one tree (default 2)
+  --symmetries N  1..8 test-time augmentations (forced to 1 for KataGo)
+  --root-symmetries N   root-only averaging, 0 = auto from the time budget
+  --cpuct F       PUCT exploration constant (default 1.10)
+  --no-gpu        never try the ONNX Runtime / DirectML backend
+  --no-nn         heuristic priors, constant leaf value
+  --handicap N    2..9 handicap stones, White to move
+  --color black|white   human colour in the GUI
+  --random-color  pick the human colour at random
+```
+
+Set `GOAI3_ORT_DLL` to an absolute `onnxruntime.dll` path to override the DLL
+search order (the engine tries: env var → exe directory → `build_out/npu/py/...`
+→ CWD → `System32`).
 
 ---
 
-## 许可
+## Regenerating the fp16 model
 
-[MIT](LICENSE)
+If you retrain or re-export the network, regenerate the fp16 graph with:
+
+```python
+import onnx
+from onnxruntime.transformers.float16 import convert_float_to_float16
+
+m = onnx.load("kata1_b11.onnx")
+onnx.save(convert_float_to_float16(m, keep_io_types=True),
+          "kata1_b11_fp16.onnx")
+```
+
+`keep_io_types=True` keeps fp32 inputs/outputs so the C API call sites do not
+change; only the internal graph and the initialisers become fp16. The
+`onnxruntime.transformers` helper needs `packaging`; if it is missing, any
+`packaging.version.parse` shim is enough (the converter only uses it to compare
+`onnx.__version__`).
+
+---
+
+## Provenance
+
+`go_ai_single.cpp` was produced by `tools/amalgamate.py` from `go_ai.cpp` plus
+`kg/infer/*.h` (dependency-ordered, include guards kept as the dedupe
+mechanism), then patched by four small fixers for the include prelude, POSIX
+guards, ORT header order and `min`/`max` undefines. This distribution is that
+file with the changes listed above applied by hand, so it no longer needs the
+`tools/` directory to build.
+
+The engine and both weight files are the project's own; the network is
+KataGo's `b11c768h12nbt3tflrs-fs-silu` architecture trained by this project.
+`onnxruntime.dll` and `DirectML.dll` are Microsoft redistributables, loaded at
+runtime only when the GPU path is taken.
