@@ -7,6 +7,7 @@ rem          build.bat portable   (no /arch:AVX2 -- runs on any x64 CPU)
 rem          build.bat debug      (unoptimized, asserts on)
 rem
 rem  Requires the MSVC x64 toolchain. The script locates vcvars64.bat itself
+rem  from the usual Visual Studio install roots; set VCVARS64 to override.
 rem ===========================================================================
 setlocal
 
